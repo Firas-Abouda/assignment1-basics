@@ -9,6 +9,26 @@ import numpy.typing as npt
 import torch
 from torch import Tensor
 
+import numpy as np
+
+
+
+import cProfile
+
+
+
+from src.tokenizer import Tokenizer, train_bpe
+from src.linear import Linear
+from src.embedding import Embedding
+from src.rmsnorm import RMSNorm
+from src.swiglu import SwiGLU
+from src.rope import RoPE
+from src.activation import Softmax, DpAttention
+from src.multihead_self_attention import MHSA
+from src.transformers import Transformer_block, Transformer_LM
+
+
+
 
 
 def run_linear(
@@ -21,8 +41,8 @@ def run_linear(
     Given the weights of a Linear layer, compute the transformation of a batched input.
 
     Args:
-        in_dim (int): The size of the input dimension
-        out_dim (int): The size of the output dimension
+        d_in (int): The size of the input dimension
+        d_out (int): The size of the output dimension
         weights (Float[Tensor, "d_out d_in"]): The linear weights to use
         in_features (Float[Tensor, "... d_in"]): The output tensor to apply the function to
     
@@ -30,7 +50,10 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    model = Linear(in_features= d_in, out_features= d_out, device=weights.device, dtype=weights.dtype)
+    model.load_state_dict({"weight" : weights})
+
+    return model.forward(in_features)
 
 
 def run_embedding(
@@ -52,7 +75,10 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    model = Embedding(vocab_size,d_model)
+    model.load_state_dict({"embedding" : weights})
+
+    return model.forward(token_ids)
 
 
 def run_swiglu(
@@ -84,7 +110,10 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    model = SwiGLU(d_model, d_ff)
+    model.load_state_dict({"w1.weight" : w1_weight, "w2.weight" : w2_weight, "w3.weight" : w3_weight })
+
+    return model.forward(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -105,7 +134,8 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    model = DpAttention()
+    return model.forward(Q, K, V, mask)
 
 
 def run_multihead_self_attention(
@@ -139,7 +169,11 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    model = MHSA(d_model, num_heads)
+    model.load_state_dict({"Wq.weight" : q_proj_weight, "Wk.weight" : k_proj_weight, "Wv.weight" : v_proj_weight, "Wo.weight" : o_proj_weight })
+
+    return model.forward(in_features)
+
 
 
 def run_multihead_self_attention_with_rope(
@@ -179,7 +213,10 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    model = MHSA(d_model, num_heads, True, max_seq_len, theta)
+    model.load_state_dict({"Wq.weight" : q_proj_weight, "Wk.weight" : k_proj_weight, "Wv.weight" : v_proj_weight, "Wo.weight" : o_proj_weight })
+    
+    return model.forward(in_features, token_positions)
 
 
 def run_rope(
@@ -201,7 +238,10 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    model = RoPE(theta, d_k, max_seq_len)
+
+    return model.forward(in_query_or_key, token_positions)
+
 
 
 def run_transformer_block(
@@ -274,7 +314,24 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    model = Transformer_block(d_model, num_heads, d_ff, max_seq_len, theta)
+    fixed_state_dict = {
+    "attention.Wq.weight": weights["attn.q_proj.weight"],
+    "attention.Wk.weight": weights["attn.k_proj.weight"],
+    "attention.Wv.weight": weights["attn.v_proj.weight"],
+    "attention.Wo.weight": weights["attn.output_proj.weight"],
+    
+    "norm1.gamma": weights["ln1.weight"],
+    "norm2.gamma": weights["ln2.weight"],
+    
+    "swiglu.w1.weight": weights["ffn.w1.weight"],
+    "swiglu.w2.weight": weights["ffn.w2.weight"],
+    "swiglu.w3.weight": weights["ffn.w3.weight"],
+    }
+    
+    model.load_state_dict(fixed_state_dict)
+
+    return model.forward(in_features)
 
 
 def run_transformer_lm(
@@ -288,7 +345,7 @@ def run_transformer_lm(
     weights: dict[str, Tensor],
     in_indices: Int[Tensor, " batch_size sequence_length"],
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
-    """Given the weights of a Transformer language model and input indices,
+    '''Given the weights of a Transformer language model and input indices,
     return the output of running a forward pass on the input indices.
 
     This function should use RoPE.
@@ -355,8 +412,51 @@ def run_transformer_lm(
     Returns:
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
-    """
-    raise NotImplementedError
+    '''
+    model = Transformer_LM(vocab_size, context_length, num_layers, d_model, num_heads, d_ff, rope_theta)
+    fixed_state_dict = {
+    # embedding
+    "embedding.embedding": weights["token_embeddings.weight"],
+    
+    # transformer block 0
+    "transformer_blocks.0.attention.Wq.weight": weights["layers.0.attn.q_proj.weight"],
+    "transformer_blocks.0.attention.Wk.weight": weights["layers.0.attn.k_proj.weight"],
+    "transformer_blocks.0.attention.Wv.weight": weights["layers.0.attn.v_proj.weight"],
+    "transformer_blocks.0.attention.Wo.weight": weights["layers.0.attn.output_proj.weight"],
+    "transformer_blocks.0.norm1.gamma": weights["layers.0.ln1.weight"],
+    "transformer_blocks.0.norm2.gamma": weights["layers.0.ln2.weight"],
+    "transformer_blocks.0.swiglu.w1.weight": weights["layers.0.ffn.w1.weight"],
+    "transformer_blocks.0.swiglu.w2.weight": weights["layers.0.ffn.w2.weight"],
+    "transformer_blocks.0.swiglu.w3.weight": weights["layers.0.ffn.w3.weight"],
+
+    # transformer block 1
+    "transformer_blocks.1.attention.Wq.weight": weights["layers.1.attn.q_proj.weight"],
+    "transformer_blocks.1.attention.Wk.weight": weights["layers.1.attn.k_proj.weight"],
+    "transformer_blocks.1.attention.Wv.weight": weights["layers.1.attn.v_proj.weight"],
+    "transformer_blocks.1.attention.Wo.weight": weights["layers.1.attn.output_proj.weight"],
+    "transformer_blocks.1.norm1.gamma": weights["layers.1.ln1.weight"],
+    "transformer_blocks.1.norm2.gamma": weights["layers.1.ln2.weight"],
+    "transformer_blocks.1.swiglu.w1.weight": weights["layers.1.ffn.w1.weight"],
+    "transformer_blocks.1.swiglu.w2.weight": weights["layers.1.ffn.w2.weight"],
+    "transformer_blocks.1.swiglu.w3.weight": weights["layers.1.ffn.w3.weight"],
+
+    # transformer block 2
+    "transformer_blocks.2.attention.Wq.weight": weights["layers.2.attn.q_proj.weight"],
+    "transformer_blocks.2.attention.Wk.weight": weights["layers.2.attn.k_proj.weight"],
+    "transformer_blocks.2.attention.Wv.weight": weights["layers.2.attn.v_proj.weight"],
+    "transformer_blocks.2.attention.Wo.weight": weights["layers.2.attn.output_proj.weight"],
+    "transformer_blocks.2.norm1.gamma": weights["layers.2.ln1.weight"],
+    "transformer_blocks.2.norm2.gamma": weights["layers.2.ln2.weight"],
+    "transformer_blocks.2.swiglu.w1.weight": weights["layers.2.ffn.w1.weight"],
+    "transformer_blocks.2.swiglu.w2.weight": weights["layers.2.ffn.w2.weight"],
+    "transformer_blocks.2.swiglu.w3.weight": weights["layers.2.ffn.w3.weight"],
+
+    # final norm & linear
+    "norm.gamma": weights["ln_final.weight"],
+    "linear.weight": weights["lm_head.weight"],
+    }
+    model.load_state_dict(fixed_state_dict)
+    return model.forward(in_indices)
 
 
 def run_rmsnorm(
@@ -379,7 +479,12 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+
+    
+    norm = RMSNorm(d_model, eps)
+    norm.load_state_dict({"gamma" : weights})
+
+    return norm.forward(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -432,7 +537,9 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    model = Softmax()
+
+    return model.forward(in_features, dim)
 
 
 def run_cross_entropy(inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]) -> Float[Tensor, ""]:
@@ -558,8 +665,38 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens)
 
+
+
+
+def init_worker_mmap(input_path):
+    global _mm, _input_path
+    _input_path = input_path
+    f = open(_input_path, 'rb')
+    _mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    # Don't close `f` — mmap needs it open!
+
+
+def pre_tokenization(
+    start: int,
+    end: int,
+    pattern: re.Pattern,
+    special_tokens_splits: str
+) -> Counter[str, int] :
+    """
+    Given a chunck and a pre-tokenization regex startegy pattern and split_pattern for special tokens
+    return the pre_tokens generated (not in tuple)
+    """
+    chunk = _mm[start:end].decode("utf-8", errors="ignore")
+    splits = re.split(special_tokens_splits, chunk)
+
+    pre_tokens = Counter()
+    
+    for split in splits:
+        pre_tokens.update(Counter(tuple(bytes(match.group(0).encode("utf-8"))) for match in pattern.finditer(split)))
+
+    return pre_tokens
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -588,4 +725,20 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+
+    return train_bpe(input_path, vocab_size, special_tokens)
+
+
+
+def main():
+    vocab_size = 10000
+    sp_tokens = ['<|endoftext|>']
+    vocab , merge = run_train_bpe(input_path= 'data/TinyStoriesV2-GPT4-train.txt', vocab_size = vocab_size, special_tokens= sp_tokens)
+    print(len(max(vocab.values(), key =  lambda x: len(x) )))
+
+
+if __name__ == "__main__":
+    # cProfile.run('main()','restats')
+    # p = pstats.Stats('restats')
+    # p.sort_stats('cumulative').print_stats(20)
+    main()
